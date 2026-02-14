@@ -335,69 +335,71 @@ class ChatManager:
     # ─── Input Prompts ──────────────────────────────────────────
 
     def _prompt_bits(self, count: int) -> Optional[List[int]]:
-        """Prompt user to enter bits. Returns list of ints or None on failure."""
-        while True:
+        """Read exactly `count` bit characters (0 or 1) one at a time.
+        Auto-submits when all characters are entered. Supports backspace.
+        """
+        import sys
+        import msvcrt
+
+        print(f"\n  {self.role} [bits] > ", end='', flush=True)
+        chars = []
+        while len(chars) < count:
             try:
-                raw = input(f"\n  {self.role} [bits] > ").strip()
-                if raw.startswith('/'):
-                    display_system_message(self.console, "Cannot use commands during key exchange.", "WARNING")
-                    continue
-                tokens = raw.split()
-                if len(tokens) != count:
-                    display_system_message(
-                        self.console,
-                        f"Need exactly {count} bits, got {len(tokens)}. Try again.",
-                        "ERROR"
-                    )
-                    continue
-                bits = []
-                for t in tokens:
-                    if t not in ('0', '1'):
-                        display_system_message(
-                            self.console,
-                            f"Invalid bit '{t}'. Only 0 or 1 allowed.",
-                            "ERROR"
-                        )
-                        break
-                    bits.append(int(t))
-                else:
-                    self.console.print(f"  [dim]Bits:[/dim] {' '.join(str(b) for b in bits)}")
-                    return bits
-            except (KeyboardInterrupt, EOFError):
+                ch = msvcrt.getwch()
+            except KeyboardInterrupt:
+                print()
                 return None
 
-    def _prompt_bases(self, count: int) -> Optional[List[str]]:
-        """Prompt user to enter basis symbols. Returns list of symbols or None."""
-        valid = {'-', '|', '/', '\\'}
-        while True:
-            try:
-                raw = input(f"\n  {self.role} [bases] > ").strip()
-                if raw.startswith('/'):
-                    display_system_message(self.console, "Cannot use commands during key exchange.", "WARNING")
-                    continue
-                tokens = raw.split()
-                if len(tokens) != count:
-                    display_system_message(
-                        self.console,
-                        f"Need exactly {count} bases, got {len(tokens)}. Try again.",
-                        "ERROR"
-                    )
-                    continue
-                all_valid = True
-                for t in tokens:
-                    if t not in valid:
-                        display_system_message(
-                            self.console,
-                            f"Invalid basis '{t}'. Use:  -  |  /  \\\\",
-                            "ERROR"
-                        )
-                        all_valid = False
-                        break
-                if all_valid:
-                    self.console.print(f"  [dim]Bases:[/dim] {' '.join(tokens)}")
-                    return tokens
-            except (KeyboardInterrupt, EOFError):
+            if ch in ('\x03',):  # Ctrl+C
+                print()
                 return None
+            elif ch in ('\b', '\x7f'):  # Backspace
+                if chars:
+                    chars.pop()
+                    print('\b \b', end='', flush=True)
+            elif ch in ('0', '1'):
+                chars.append(ch)
+                print(ch, end='', flush=True)
+            # Ignore any other character silently
+
+        print()  # newline after auto-submit
+        bits = [int(c) for c in chars]
+        self.console.print(f"  [dim]Bits:[/dim] {' '.join(chars)}")
+        return bits
+
+    def _prompt_bases(self, count: int) -> Optional[List[str]]:
+        """Read exactly `count` basis characters one at a time.
+        Valid: -  |  /  \\
+        Auto-submits when all characters are entered. Supports backspace.
+        """
+        import sys
+        import msvcrt
+
+        valid = {'-', '|', '/', '\\'}
+        print(f"\n  {self.role} [bases] > ", end='', flush=True)
+        chars = []
+        while len(chars) < count:
+            try:
+                ch = msvcrt.getwch()
+            except KeyboardInterrupt:
+                print()
+                return None
+
+            if ch in ('\x03',):  # Ctrl+C
+                print()
+                return None
+            elif ch in ('\b', '\x7f'):  # Backspace
+                if chars:
+                    chars.pop()
+                    print('\b \b', end='', flush=True)
+            elif ch in valid:
+                chars.append(ch)
+                print(ch, end='', flush=True)
+            # Ignore any other character silently
+
+        print()  # newline after auto-submit
+        self.console.print(f"  [dim]Bases:[/dim] {' '.join(chars)}")
+        return chars
 
     # ─── Message Handling ───────────────────────────────────────
 
