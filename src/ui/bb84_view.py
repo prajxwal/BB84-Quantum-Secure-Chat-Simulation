@@ -27,11 +27,12 @@ def display_bb84_interactive_result(console: Console, final_key: List[int],
         console.print(f"[bold red]╚═══════════════════════════════════╝[/]")
     else:
         from src.crypto.utils import key_to_hex
+        from src.crypto.key_manager import EXPANDED_KEY_BITS
         key_hex = key_to_hex(final_key[:64])
-        final_len = len(final_key)
+        seed_len = len(final_key)
 
         console.print(f"[bold green]╔══ 🟢 SECURE KEY ESTABLISHED ══╗[/]")
-        console.print(f"[bold green]║[/] Length: {final_len} bits │ Error: {error_rate:.1%}")
+        console.print(f"[bold green]║[/] Length: {seed_len} bits → {EXPANDED_KEY_BITS}b expanded │ Error: {error_rate:.1%}")
         console.print(f"[bold green]║[/] Key: [dim]{key_hex}[/]")
         console.print(f"[bold green]╚═══════════════════════════════════╝[/]")
 
