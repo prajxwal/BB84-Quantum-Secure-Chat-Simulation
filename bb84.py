@@ -136,6 +136,18 @@ def check_errors(alice_key, bob_key, sample_fraction=SAMPLE_FRACTION):
 def remove_sample_bits(key, sample_positions):
     s = set(sample_positions); return [b for i, b in enumerate(key) if i not in s]
 
+class Eve:
+    def __init__(self):
+        self.intercepted_count = 0; self.last_bases = []; self.last_bits = []
+    def intercept(self, photons):
+        n = len(photons); eve_bases = generate_random_bases(n)
+        eve_bits = []; modified_photons = []
+        for photon, eve_basis in zip(photons, eve_bases):
+            m_bit = measure_photon(photon, eve_basis); eve_bits.append(m_bit)
+            modified_photons.append(encode_photon(m_bit, eve_basis))
+        self.intercepted_count += n; self.last_bases = eve_bases; self.last_bits = eve_bits
+        return modified_photons, eve_bits, eve_bases
+
 # ═══════════════════════════════════════════════════════════════
 # CRYPTO UTILITIES
 # ═══════════════════════════════════════════════════════════════
@@ -539,7 +551,7 @@ def display_help(console):
                       ("/refresh","Generate new BB84 key (interactive)"), ("/stats","Show statistics"),
                       ("/verbose on|off","Toggle encryption details"), ("/clear","Clear screen"),
                       ("/history","Show message history"), ("/export","Export transcript"),
-                      ("/quit","Exit (also Ctrl+C)")]:
+                      ("/eve","Toggle Eve eavesdropper simulation"), ("/quit","Exit (also Ctrl+C)")]:
         console.print(f"  [bold]{cmd}[/]  {desc}")
     console.print()
     console.print("[bold]BB84 Bases:[/]  [bold]-[/] horizontal  [bold]|[/] vertical  [bold]/[/] diagonal  [bold]\\[/] anti-diag")
@@ -607,6 +619,10 @@ class ChatManager:
         photons = encode_photons(alice_bits, alice_bases)
         polarizations = ' '.join(BIT_BASIS_TO_SYMBOL.get((p.bit, p.basis), '?') for p in photons)
         self.console.print(f"  [dim]Your photons:[/dim] [bright_yellow]{polarizations}[/]")
+        if self.stats.eve_active:
+            eve = Eve()
+            photons, _, _ = eve.intercept(photons)
+            self.console.print(f"  [bold red]{SYMBOLS['warning']} Eve intercepted and modified the photons![/]")
         self.console.print(); self.console.print("[bold bright_cyan]\\[4/7][/] Transmitting photons to Bob...")
         self.console.print("  Alice [bright_yellow]~~~> ~~~> ~~~> ~~~>[/] Bob")
         try: self.network.send(MSG_BB84_PHOTONS, {'photons': [p.to_dict() for p in photons]})
@@ -798,6 +814,12 @@ class ChatManager:
         elif command == '/export':
             filename = f"chat_transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             self.history.export(filename); display_system_message(self.console, f"Transcript exported to {filename}", "SUCCESS")
+        elif command == '/eve':
+            self.stats.eve_active = not self.stats.eve_active
+            state = "enabled" if self.stats.eve_active else "disabled"
+            display_system_message(self.console, f"Eve simulation is now {state}.", "WARNING")
+            try: self.network.send(MSG_EVE_TOGGLE, {'active': self.stats.eve_active})
+            except: pass
         elif command == '/quit':
             display_system_message(self.console, "Disconnecting...", "INFO")
             try: self.network.send(MSG_DISCONNECT, {})

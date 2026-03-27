@@ -23,6 +23,7 @@ def encrypt_message(
 
     Returns:
         - ciphertext_hex: hexadecimal ciphertext
+        
         - details: dict with visualization data (message_bits, key_bits, cipher_bits)
     """
     message_bits = text_to_binary(message)
