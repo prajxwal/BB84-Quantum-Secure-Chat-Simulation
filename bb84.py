@@ -69,8 +69,8 @@ MSG_EVE_TOGGLE = 0x50; MSG_DISCONNECT = 0xFE; MSG_ERROR = 0xFF
 # ═══════════════════════════════════════════════════════════════
 HOST = 'localhost'; PORT = 5000; BUFFER_SIZE = 8192
 CONNECTION_TIMEOUT = 30; RETRY_ATTEMPTS = 3; RETRY_BACKOFF = [1, 2, 4]
-NUM_PHOTONS = 256; INTERACTIVE_NUM_PHOTONS = 16; MIN_KEY_LENGTH = 2
-MAX_KEY_LENGTH = 128; ERROR_THRESHOLD = 0.10; SAMPLE_FRACTION = 0.25
+NUM_PHOTONS = 256; INTERACTIVE_NUM_PHOTONS = 32; MIN_KEY_LENGTH = 2
+MAX_KEY_LENGTH = 128; ERROR_THRESHOLD = 0.10; SAMPLE_FRACTION = 0.5
 KEY_ROTATION_THRESHOLD = 0.75; AUTO_ROTATION = True
 ANIMATION_SPEED = 0.03; SHOW_ENCRYPTION_DETAILS = True; ENABLE_STATISTICS = True
 
@@ -714,7 +714,8 @@ class ChatManager:
         matching_positions = self._received_matches
         bob_raw_key = extract_key_bits(bob_bits, matching_positions)
         # Send a sample of Bob's key bits to Alice for error checking
-        sample_size = max(1, int(len(bob_raw_key) * SAMPLE_FRACTION))
+        sample_size = max(3, int(len(bob_raw_key) * SAMPLE_FRACTION))
+        sample_size = min(sample_size, len(bob_raw_key))  # can't sample more than we have
         sample_positions = sorted(random.sample(range(len(bob_raw_key)), min(sample_size, len(bob_raw_key))))
         bob_sample_bits = [bob_raw_key[i] for i in sample_positions]
         self.console.print(); self.console.print("[bold bright_cyan]\\[7/7][/] Sending sample bits to Alice for error checking...")
@@ -888,6 +889,41 @@ class ChatManager:
         else: display_system_message(self.console, f"Unknown command: {command}. Type /help.", "ERROR")
         return True
 
+    def _get_chat_input(self, prompt):
+        """Non-blocking input that can be interrupted by _exchange_requested.
+        Returns the typed string, or None if an exchange was requested.
+        """
+        print(prompt, end='', flush=True)
+        chars = []
+        while self.running:
+            # Check if Bob needs to auto-start an exchange
+            if self.role == "Bob" and self._exchange_requested.is_set():
+                print()  # newline to clean up the prompt
+                return None  # Signal to start exchange
+            try:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch == '\r':  # Enter
+                        print()
+                        return ''.join(chars)
+                    elif ch == '\x03':  # Ctrl+C
+                        raise KeyboardInterrupt
+                    elif ch in ('\b', '\x7f'):  # Backspace
+                        if chars:
+                            chars.pop()
+                            print('\b \b', end='', flush=True)
+                    elif ch == '\x0c':  # Ctrl+L (clear)
+                        print()
+                        return '/clear'
+                    else:
+                        chars.append(ch)
+                        print(ch, end='', flush=True)
+                else:
+                    time.sleep(0.1)  # Small sleep to avoid busy-waiting
+            except KeyboardInterrupt:
+                raise
+        return None
+
     def run(self):
         display_welcome(self.console, self.role); self.stats.mark_connected()
         self.network.start_receiving(self.handle_received_message)
@@ -897,14 +933,15 @@ class ChatManager:
         display_status_bar(self.console, self.send_key_manager, self.stats)
         while self.running:
             try:
-                # Check if Bob needs to auto-start an exchange
-                if self.role == "Bob" and self._exchange_requested.is_set():
-                    self._exchange_requested.clear()
-                    self.interactive_key_exchange_bob()
-                    display_header(self.console, self.role, self.peer, self.send_key_manager, self.stats)
-                    display_status_bar(self.console, self.send_key_manager, self.stats)
+                user_input = self._get_chat_input(f"\n  {self.role} > ")
+                if user_input is None:
+                    if self.role == "Bob" and self._exchange_requested.is_set():
+                        self._exchange_requested.clear()
+                        self.interactive_key_exchange_bob()
+                        display_header(self.console, self.role, self.peer, self.send_key_manager, self.stats)
+                        display_status_bar(self.console, self.send_key_manager, self.stats)
                     continue
-                user_input = input(f"\n  {self.role} > ").strip()
+                user_input = user_input.strip()
                 if not user_input: continue
                 if user_input.startswith('/'):
                     if not self.process_command(user_input): break
