@@ -139,8 +139,9 @@ def remove_sample_bits(key, sample_positions):
 class Eve:
     def __init__(self):
         self.intercepted_count = 0; self.last_bases = []; self.last_bits = []
-    def intercept(self, photons):
-        n = len(photons); eve_bases = generate_random_bases(n)
+    def intercept(self, photons, eve_bases=None):
+        n = len(photons)
+        if eve_bases is None: eve_bases = generate_random_bases(n)
         eve_bits = []; modified_photons = []
         for photon, eve_basis in zip(photons, eve_bases):
             m_bit = measure_photon(photon, eve_basis); eve_bits.append(m_bit)
@@ -620,8 +621,14 @@ class ChatManager:
         polarizations = ' '.join(BIT_BASIS_TO_SYMBOL.get((p.bit, p.basis), '?') for p in photons)
         self.console.print(f"  [dim]Your photons:[/dim] [bright_yellow]{polarizations}[/]")
         if self.stats.eve_active:
+            self.console.print(); self.console.print(f"[bold red]{SYMBOLS['warning']} EVE INTERCEPTION: Choose Eve's measurement bases:[/]")
+            self.console.print("  [dim]Use polarization symbols:[/dim]  [bold]-[/]  [bold]|[/]  [bold]/[/]  [bold]\\\\[/]")
+            self.console.print(f"  [dim]Need {num} symbols.[/dim]")
+            eve_bases_input = self._prompt_bases(num, prompt_role="Eve")
+            if eve_bases_input is None: return
+            eve_bases = [RECTILINEAR if s in ('-','|') else DIAGONAL for s in eve_bases_input]
             eve = Eve()
-            photons, _, _ = eve.intercept(photons)
+            photons, _, _ = eve.intercept(photons, eve_bases=eve_bases)
             self.console.print(f"  [bold red]{SYMBOLS['warning']} Eve intercepted and modified the photons![/]")
         self.console.print(); self.console.print("[bold bright_cyan]\\[4/7][/] Transmitting photons to Bob...")
         self.console.print("  Alice [bright_yellow]~~~> ~~~> ~~~> ~~~>[/] Bob")
@@ -718,9 +725,10 @@ class ChatManager:
         self.console.print(f"  [dim]Bits:[/dim] {' '.join(chars)}")
         return [int(c) for c in chars]
 
-    def _prompt_bases(self, count):
+    def _prompt_bases(self, count, prompt_role=None):
         valid = {'-', '|', '/', '\\'}
-        print(f"\n  {self.role} [bases] > ", end='', flush=True)
+        role_str = prompt_role if prompt_role else self.role
+        print(f"\n  {role_str} [bases] > ", end='', flush=True)
         chars = []
         while len(chars) < count:
             try: ch = _getch()

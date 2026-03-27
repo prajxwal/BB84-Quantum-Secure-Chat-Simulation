@@ -130,6 +130,19 @@ class ChatManager:
         polarizations = ' '.join(pol_list)
         self.console.print(f"  [dim]Your photons:[/dim] [bright_yellow]{polarizations}[/]")
 
+        if self.stats.eve_active:
+            self.console.print()
+            self.console.print(f"[bold red]{SYMBOLS['warning']} EVE INTERCEPTION: Choose Eve's measurement bases:[/]")
+            self.console.print("  [dim]Use polarization symbols:[/dim]  [bold]-[/]  [bold]|[/]  [bold]/[/]  [bold]\\\\[/]")
+            self.console.print(f"  [dim]Need {num} symbols.[/dim]")
+            eve_bases_input = self._prompt_bases(num, prompt_role="Eve")
+            if eve_bases_input is None: return
+            eve_bases = [RECTILINEAR if s in ('-','|') else DIAGONAL for s in eve_bases_input]
+            from src.bb84.eavesdropper import Eve
+            eve = Eve()
+            photons, _, _ = eve.intercept(photons, eve_bases=eve_bases)
+            self.console.print(f"  [bold red]{SYMBOLS['warning']} Eve intercepted and modified the photons![/]")
+
         # Step 4: Send photons to Bob
         self.console.print()
         self.console.print("[bold bright_cyan]\\[4/7][/] Transmitting photons to Bob...")
@@ -367,7 +380,7 @@ class ChatManager:
         self.console.print(f"  [dim]Bits:[/dim] {' '.join(chars)}")
         return bits
 
-    def _prompt_bases(self, count: int) -> Optional[List[str]]:
+    def _prompt_bases(self, count: int, prompt_role: Optional[str] = None) -> Optional[List[str]]:
         """Read exactly `count` basis characters one at a time.
         Valid: -  |  /  \\
         Auto-submits when all characters are entered. Supports backspace.
@@ -376,7 +389,8 @@ class ChatManager:
         import msvcrt
 
         valid = {'-', '|', '/', '\\'}
-        print(f"\n  {self.role} [bases] > ", end='', flush=True)
+        role_str = prompt_role if prompt_role else self.role
+        print(f"\n  {role_str} [bases] > ", end='', flush=True)
         chars = []
         while len(chars) < count:
             try:
@@ -592,6 +606,15 @@ class ChatManager:
             filename = f"chat_transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             self.history.export(filename)
             display_system_message(self.console, f"Transcript exported to {filename}", "SUCCESS")
+
+        elif command == '/eve':
+            self.stats.eve_active = not self.stats.eve_active
+            state = "enabled" if self.stats.eve_active else "disabled"
+            display_system_message(self.console, f"Eve simulation is now {state}.", "WARNING")
+            try:
+                self.network.send(MSG_EVE_TOGGLE, {'active': self.stats.eve_active})
+            except Exception:
+                pass
 
         elif command == '/quit':
             display_system_message(self.console, "Disconnecting...", "INFO")

@@ -25,7 +25,7 @@ class Eve:
         self.last_bases = []
         self.last_bits = []
 
-    def intercept(self, photons: List[Photon]) -> Tuple[List[Photon], List[int], List[int]]:
+    def intercept(self, photons: List[Photon], eve_bases: List[int] = None) -> Tuple[List[Photon], List[int], List[int]]:
         """
         Intercept and re-encode photons.
 
@@ -35,7 +35,8 @@ class Eve:
             - eve_bases: bases Eve used
         """
         n = len(photons)
-        eve_bases = generate_random_bases(n)
+        if eve_bases is None:
+            eve_bases = generate_random_bases(n)
         eve_bits = []
         modified_photons = []
 
