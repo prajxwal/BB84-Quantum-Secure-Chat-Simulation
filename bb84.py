@@ -595,9 +595,10 @@ class ChatManager:
         self.peer_address = ""
         self._key_ready = threading.Event(); self._init_received = threading.Event()
         self._photons_received = threading.Event(); self._bases_received = threading.Event()
-        self._matches_received = threading.Event()
+        self._matches_received = threading.Event(); self._sample_received = threading.Event()
         self._received_photons_data = None; self._received_bases = None
         self._received_matches = None; self._received_key = None; self._received_error_rate = None
+        self._received_sample = None; self._exchange_requested = threading.Event()
 
     def interactive_key_exchange_alice(self):
         num = INTERACTIVE_NUM_PHOTONS; self._clear_exchange_state()
@@ -650,18 +651,39 @@ class ChatManager:
         self.console.print(f"  [dim]Match rate:[/dim] {match_rate:.1%} ({len(matching_positions)}/{num})")
         self.network.send(MSG_BB84_MATCHES, {'positions': matching_positions, 'alice_bases': alice_bases})
         alice_raw_key = extract_key_bits(alice_bits, matching_positions)
-        self.console.print(); self.console.print("[bold bright_cyan]\\[7/7][/] Error checking...")
-        error_rate, sample_positions, _, _ = check_errors(alice_raw_key, alice_raw_key)
-        alice_final_key = remove_sample_bits(alice_raw_key, sample_positions)
+        # Wait for Bob's sample bits to do real error checking
+        self.console.print(); self.console.print("[bold bright_cyan]\\[7/7][/] Error checking (waiting for Bob's sample)...")
+        if not self._sample_received.wait(timeout=300.0):
+            display_system_message(self.console, "Timed out waiting for Bob's sample.", "ERROR"); return
+        bob_sample_data = self._received_sample
+        bob_sample_positions = bob_sample_data['positions']
+        bob_sample_bits = bob_sample_data['bits']
+        alice_sample_bits = [alice_raw_key[i] for i in bob_sample_positions]
+        errors = sum(a != b for a, b in zip(alice_sample_bits, bob_sample_bits))
+        error_rate = errors / len(bob_sample_positions) if bob_sample_positions else 0.0
+        self.console.print(f"  [dim]Sample size:[/dim] {len(bob_sample_positions)} bits")
+        self.console.print(f"  [dim]Errors found:[/dim] {errors}")
+        self.console.print(f"  [dim]Error rate:[/dim] {error_rate:.1%}")
+        alice_final_key = remove_sample_bits(alice_raw_key, bob_sample_positions)
+        if error_rate > ERROR_THRESHOLD:
+            self.console.print(f"[bold red]╔══ {SYMBOLS['compromised']} EAVESDROPPER DETECTED ══╗[/]")
+            self.console.print(f"[bold red]║[/] Error rate {error_rate:.1%} exceeds threshold {ERROR_THRESHOLD:.1%}")
+            self.console.print(f"[bold red]║[/] Key exchange ABORTED — channel is compromised!")
+            self.console.print(f"[bold red]╚═══════════════════════════════════╝[/]")
+            self.stats.eavesdropper_detected_count += 1
+            self.stats.keys_compromised += 1
+            try: self.network.send(MSG_BB84_ABORT, {'reason': 'eve_detected', 'error_rate': error_rate})
+            except: pass
+            return
         if len(alice_final_key) < 1:
             display_system_message(self.console, "Key too short! Try again with /refresh.", "ERROR"); return
-        self.send_key_manager.set_key(list(alice_final_key), 0.0)
-        self.recv_key_manager.set_key(list(alice_final_key), 0.0); self._key_ready.set()
-        try: self.network.send(MSG_BB84_COMPLETE, {'key': alice_final_key, 'error_rate': 0.0})
+        self.send_key_manager.set_key(list(alice_final_key), error_rate)
+        self.recv_key_manager.set_key(list(alice_final_key), error_rate); self._key_ready.set()
+        try: self.network.send(MSG_BB84_COMPLETE, {'key': alice_final_key, 'error_rate': error_rate})
         except: pass
-        display_bb84_interactive_result(self.console, alice_final_key, 0.0, match_rate, num)
+        display_bb84_interactive_result(self.console, alice_final_key, error_rate, match_rate, num)
         self.stats.record_key_exchange(photons=num, matches=len(matching_positions),
-            match_rate=match_rate, error_rate=0.0, key_length=len(alice_final_key), duration=0.0)
+            match_rate=match_rate, error_rate=error_rate, key_length=len(alice_final_key), duration=0.0)
 
     def interactive_key_exchange_bob(self):
         num = INTERACTIVE_NUM_PHOTONS; self._clear_exchange_state()
@@ -687,18 +709,33 @@ class ChatManager:
         self.console.print(); self.console.print("[dim]Sending your bases to Alice...[/dim]")
         self.network.send(MSG_BB84_BASES, {'bases': bob_bases})
         self.console.print(); self.console.print("[bold bright_cyan]\\[6/7][/] Waiting for basis reconciliation from Alice...")
+        if not self._matches_received.wait(timeout=300.0):
+            display_system_message(self.console, "Timed out waiting for matching positions.", "ERROR"); return
+        matching_positions = self._received_matches
+        bob_raw_key = extract_key_bits(bob_bits, matching_positions)
+        # Send a sample of Bob's key bits to Alice for error checking
+        sample_size = max(1, int(len(bob_raw_key) * SAMPLE_FRACTION))
+        sample_positions = sorted(random.sample(range(len(bob_raw_key)), min(sample_size, len(bob_raw_key))))
+        bob_sample_bits = [bob_raw_key[i] for i in sample_positions]
+        self.console.print(); self.console.print("[bold bright_cyan]\\[7/7][/] Sending sample bits to Alice for error checking...")
+        self.console.print(f"  [dim]Sample size:[/dim] {len(sample_positions)} bits")
+        self.network.send(MSG_BB84_SAMPLE, {'positions': sample_positions, 'bits': bob_sample_bits})
+        # Wait for final key or abort from Alice
         if not self._key_ready.wait(timeout=300.0):
-            display_system_message(self.console, "Timed out waiting for key.", "ERROR"); return
+            display_system_message(self.console, "Timed out waiting for key. Eve may have been detected.", "ERROR"); return
         key_bits = self._received_key; error_rate = self._received_error_rate or 0.0
+        if not key_bits:
+            # Abort was received (Eve detected), message already displayed by handler
+            return
         self.send_key_manager.set_key(list(key_bits), error_rate)
         self.recv_key_manager.set_key(list(key_bits), error_rate)
         display_bb84_interactive_result(self.console, key_bits, error_rate, 0.0, num)
         display_system_message(self.console, f"Secure key received: {len(key_bits)} bits", "SUCCESS")
 
     def _clear_exchange_state(self):
-        for e in (self._key_ready, self._init_received, self._photons_received, self._bases_received, self._matches_received): e.clear()
+        for e in (self._key_ready, self._init_received, self._photons_received, self._bases_received, self._matches_received, self._sample_received): e.clear()
         self._received_photons_data = self._received_bases = self._received_matches = None
-        self._received_key = self._received_error_rate = None
+        self._received_key = self._received_error_rate = self._received_sample = None
 
     def _display_basis_comparison(self, alice_bases, bob_bases, num):
         table = Table(box=box.SIMPLE, show_header=True, header_style="dim", padding=(0, 1))
@@ -770,14 +807,29 @@ class ChatManager:
                 self._received_bases = payload.get('bases', []); self._bases_received.set()
             elif msg_type == MSG_BB84_MATCHES:
                 self._received_matches = payload.get('positions', []); self._matches_received.set()
+            elif msg_type == MSG_BB84_SAMPLE:
+                self._received_sample = payload; self._sample_received.set()
             elif msg_type == MSG_BB84_COMPLETE: self._handle_key_sync(payload)
+            elif msg_type == MSG_BB84_ABORT:
+                reason = payload.get('reason', 'unknown')
+                error_rate = payload.get('error_rate', 0.0)
+                if reason == 'eve_detected':
+                    self.console.print(f"[bold red]╔══ {SYMBOLS['compromised']} EAVESDROPPER DETECTED ══╗[/]")
+                    self.console.print(f"[bold red]║[/] Alice detected errors: {error_rate:.1%}")
+                    self.console.print(f"[bold red]║[/] Key exchange ABORTED — channel is compromised!")
+                    self.console.print(f"[bold red]╚═══════════════════════════════════╝[/]")
+                else:
+                    display_system_message(self.console, f"Key exchange aborted: {reason}", "ERROR")
+                self._key_ready.set()  # Unblock Bob's wait
             elif msg_type == MSG_EVE_TOGGLE:
                 display_system_message(self.console, f"Peer toggled Eve: {'enabled' if payload.get('active') else 'disabled'}", "INFO")
             elif msg_type == MSG_DISCONNECT:
                 display_system_message(self.console, "Peer disconnected.", "WARNING"); self.running = False
             elif msg_type == MSG_KEY_ROTATE:
                 display_system_message(self.console, "Peer is starting new key exchange...", "INFO")
-                if self.role == "Bob": self._clear_exchange_state()
+                if self.role == "Bob":
+                    self._clear_exchange_state()
+                    self._exchange_requested.set()
 
     def _handle_chat(self, payload):
         ciphertext = payload['ciphertext']; sender = payload.get('sender', self.peer)
@@ -845,9 +897,16 @@ class ChatManager:
         display_status_bar(self.console, self.send_key_manager, self.stats)
         while self.running:
             try:
+                # Check if Bob needs to auto-start an exchange
+                if self.role == "Bob" and self._exchange_requested.is_set():
+                    self._exchange_requested.clear()
+                    self.interactive_key_exchange_bob()
+                    display_header(self.console, self.role, self.peer, self.send_key_manager, self.stats)
+                    display_status_bar(self.console, self.send_key_manager, self.stats)
+                    continue
                 user_input = input(f"\n  {self.role} > ").strip()
                 if not user_input: continue
-                if user_input.startswith('/'): 
+                if user_input.startswith('/'):
                     if not self.process_command(user_input): break
                 else: self.send_chat_message(user_input)
             except (KeyboardInterrupt, EOFError):
