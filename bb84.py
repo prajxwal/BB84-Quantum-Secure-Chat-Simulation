@@ -958,6 +958,328 @@ class ChatManager:
         self.network.stop(); display_system_message(self.console, "Keys cleared from memory. Goodbye!", "SUCCESS")
 
 # ═══════════════════════════════════════════════════════════════
+# EVE PROXY (Man-in-the-Middle)
+# ═══════════════════════════════════════════════════════════════
+class EveProxy:
+    """Eve sits between Alice and Bob as a transparent MITM proxy.
+    She runs a server (Alice connects to her) and a client (she connects to Bob).
+    All traffic is relayed, but BB84 photons are intercepted and re-encoded."""
+
+    def __init__(self, bob_host='localhost', bob_port=PORT, listen_port=None):
+        self.bob_host = bob_host
+        self.bob_port = bob_port
+        self.listen_port = listen_port if listen_port else bob_port + 1
+        self.console = create_console()
+        self.eve = Eve()
+        self.running = False
+        self.intercept_active = True  # Whether to intercept photons
+
+        # Sockets
+        self.server_socket = None   # Listens for Alice
+        self.alice_socket = None    # Connection from Alice
+        self.bob_socket = None      # Connection to Bob
+
+        # Stats
+        self.messages_relayed = 0
+        self.photons_intercepted = 0
+        self.keys_observed = 0
+        self.chat_messages_seen = []
+
+    def start(self):
+        self.console.print()
+        self.console.print("[bold red]╔══════════════════════════════════════════════╗[/]")
+        self.console.print("[bold red]║[/]  [bold bright_white]👁️  EVE — QUANTUM EAVESDROPPER[/]              [bold red]║[/]")
+        self.console.print("[bold red]║[/]  [dim]Man-in-the-Middle • Intercept & Relay[/]     [bold red]║[/]")
+        self.console.print("[bold red]╚══════════════════════════════════════════════╝[/]")
+        self.console.print()
+
+        # Step 1: Connect to Bob first
+        self.console.print(f"[bold red]  ┌─ Connecting to Bob at {self.bob_host}:{self.bob_port}...[/]")
+        self.bob_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.bob_socket.settimeout(CONNECTION_TIMEOUT)
+        try:
+            self.bob_socket.connect((self.bob_host, self.bob_port))
+            self.bob_socket.settimeout(None)
+            self.console.print(f"[bold red]  │  [bold green]✓ Connected to Bob![/]")
+        except (ConnectionRefusedError, socket.timeout, OSError) as e:
+            self.console.print(f"[bold red]  └─ ✗ Failed to connect to Bob: {e}[/]")
+            return False
+
+        # Step 2: Start server for Alice
+        self.console.print(f"[bold red]  │[/]")
+        self.console.print(f"[bold red]  ├─ Starting proxy server on port {self.listen_port}...[/]")
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind(('0.0.0.0', self.listen_port))
+        self.server_socket.listen(1)
+        self.console.print(f"[bold red]  │  [dim]Tell Alice to connect to port {self.listen_port}[/]")
+        self.console.print(f"[bold red]  │[/]")
+        self.console.print(f"[bold red]  ├─ Waiting for Alice to connect...[/]")
+
+        try:
+            self.alice_socket, alice_addr = self.server_socket.accept()
+            self.alice_socket.settimeout(None)
+            self.console.print(f"[bold red]  │  [bold green]✓ Alice connected from {alice_addr}![/]")
+        except KeyboardInterrupt:
+            self.console.print(f"[bold red]  └─ Interrupted.[/]")
+            self.stop()
+            return False
+
+        self.console.print(f"[bold red]  └─ [bold bright_white]MITM proxy active![/] Intercepting all traffic.[/]")
+        self.console.print()
+        self._display_topology()
+        self.console.print()
+        self.console.print("[dim]  Press Ctrl+C to stop Eve.[/]")
+        self.console.print()
+
+        self.running = True
+
+        # Start relay threads
+        t_a2b = threading.Thread(target=self._relay_alice_to_bob, daemon=True)
+        t_b2a = threading.Thread(target=self._relay_bob_to_alice, daemon=True)
+        t_a2b.start()
+        t_b2a.start()
+
+        # Block main thread
+        try:
+            while self.running:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            self.console.print()
+            self.console.print("[bold red]  Eve shutting down...[/]")
+
+        self._display_summary()
+        self.stop()
+        return True
+
+    def _display_topology(self):
+        self.console.print("[bold red]  ┌─────────────────────────────────────────────────┐[/]")
+        self.console.print("[bold red]  │[/]  [bold cyan]Alice[/]  ──→  [bold red]👁️  Eve (you)[/]  ──→  [bold green]Bob[/]     [bold red]│[/]")
+        self.console.print("[bold red]  │[/]  [bold green]Bob[/]    ──→  [bold red]👁️  Eve (you)[/]  ──→  [bold cyan]Alice[/]   [bold red]│[/]")
+        self.console.print("[bold red]  └─────────────────────────────────────────────────┘[/]")
+
+    def _relay_alice_to_bob(self):
+        """Relay traffic from Alice → Eve → Bob, intercepting photons."""
+        while self.running:
+            try:
+                header_data = _recv_exactly(self.alice_socket, HEADER_SIZE)
+                if not header_data:
+                    self._log("Alice disconnected.", "WARNING")
+                    self.running = False
+                    break
+                msg_type, payload_len, seq = unpack_header(header_data)
+                if payload_len > 0:
+                    payload_data = _recv_exactly(self.alice_socket, payload_len)
+                    if not payload_data:
+                        self.running = False
+                        break
+                    payload = unpack_payload(payload_data)
+                else:
+                    payload = {}
+
+                self.messages_relayed += 1
+
+                # Intercept and process
+                if msg_type == MSG_BB84_PHOTONS and self.intercept_active:
+                    payload = self._intercept_photons(payload, "Alice→Bob")
+                elif msg_type == MSG_CHAT:
+                    self._sniff_chat(payload, "Alice→Bob")
+                elif msg_type == MSG_BB84_INIT:
+                    self._log("Alice initiated BB84 key exchange", "INTERCEPT")
+                elif msg_type == MSG_BB84_COMPLETE:
+                    self._log_key_complete(payload, "Alice→Bob")
+                elif msg_type == MSG_DISCONNECT:
+                    self._log("Alice is disconnecting", "WARNING")
+                else:
+                    self._log_relay(msg_type, "Alice→Bob")
+
+                # Forward to Bob (possibly modified)
+                fwd_payload = json.dumps(payload).encode('utf-8')
+                fwd_header = struct.pack(HEADER_FORMAT, msg_type, len(fwd_payload), seq)
+                self.bob_socket.sendall(fwd_header + fwd_payload)
+
+            except (ConnectionError, OSError):
+                if self.running:
+                    self._log("Alice connection lost", "ERROR")
+                    self.running = False
+                break
+            except Exception as e:
+                if self.running:
+                    self._log(f"Alice relay error: {e}", "ERROR")
+                    self.running = False
+                break
+
+    def _relay_bob_to_alice(self):
+        """Relay traffic from Bob → Eve → Alice."""
+        while self.running:
+            try:
+                header_data = _recv_exactly(self.bob_socket, HEADER_SIZE)
+                if not header_data:
+                    self._log("Bob disconnected.", "WARNING")
+                    self.running = False
+                    break
+                msg_type, payload_len, seq = unpack_header(header_data)
+                if payload_len > 0:
+                    payload_data = _recv_exactly(self.bob_socket, payload_len)
+                    if not payload_data:
+                        self.running = False
+                        break
+                    payload = unpack_payload(payload_data)
+                else:
+                    payload = {}
+
+                self.messages_relayed += 1
+
+                # Process but don't modify Bob→Alice traffic (photons only go Alice→Bob)
+                if msg_type == MSG_CHAT:
+                    self._sniff_chat(payload, "Bob→Alice")
+                elif msg_type == MSG_BB84_BASES:
+                    self._log(f"Bob sent his measurement bases ({len(payload.get('bases',[]))} bases)", "INTERCEPT")
+                elif msg_type == MSG_BB84_SAMPLE:
+                    self._log_sample(payload, "Bob→Alice")
+                elif msg_type == MSG_BB84_ABORT:
+                    reason = payload.get('reason', 'unknown')
+                    self._log(f"Key exchange ABORTED: {reason}", "CAUGHT")
+                elif msg_type == MSG_DISCONNECT:
+                    self._log("Bob is disconnecting", "WARNING")
+                else:
+                    self._log_relay(msg_type, "Bob→Alice")
+
+                # Forward to Alice unmodified
+                fwd_payload = json.dumps(payload).encode('utf-8')
+                fwd_header = struct.pack(HEADER_FORMAT, msg_type, len(fwd_payload), seq)
+                self.alice_socket.sendall(fwd_header + fwd_payload)
+
+            except (ConnectionError, OSError):
+                if self.running:
+                    self._log("Bob connection lost", "ERROR")
+                    self.running = False
+                break
+            except Exception as e:
+                if self.running:
+                    self._log(f"Bob relay error: {e}", "ERROR")
+                    self.running = False
+                break
+
+    def _intercept_photons(self, payload, direction):
+        """Intercept BB84 photons: measure with random bases, re-encode, forward."""
+        photon_dicts = payload.get('photons', [])
+        photons = [Photon.from_dict(d) for d in photon_dicts]
+        n = len(photons)
+
+        modified_photons, eve_bits, eve_bases = self.eve.intercept(photons)
+        self.photons_intercepted += n
+
+        time_str = datetime.now().strftime('%H:%M:%S')
+        self.console.print(f"[dim]{time_str}[/] [bold red]👁️  PHOTON INTERCEPT[/] [{direction}]")
+        self.console.print(f"         [bold red]│[/] Intercepted [bold]{n}[/] photons")
+
+        # Show first few photons
+        orig_symbols = ' '.join(BIT_BASIS_TO_SYMBOL.get((p.bit, p.basis), '?') for p in photons[:16])
+        eve_basis_symbols = ' '.join(BASIS_SYMBOLS.get(b, '?') for b in eve_bases[:16])
+        eve_bit_str = ' '.join(str(b) for b in eve_bits[:16])
+        mod_symbols = ' '.join(BIT_BASIS_TO_SYMBOL.get((p.bit, p.basis), '?') for p in modified_photons[:16])
+
+        self.console.print(f"         [bold red]│[/] [dim]Original :[/] {orig_symbols}{'...' if n > 16 else ''}")
+        self.console.print(f"         [bold red]│[/] [dim]Eve bases:[/] {eve_basis_symbols}{'...' if n > 16 else ''}")
+        self.console.print(f"         [bold red]│[/] [dim]Eve bits :[/] {eve_bit_str}{'...' if n > 16 else ''}")
+        self.console.print(f"         [bold red]│[/] [dim]Forwarded:[/] {mod_symbols}{'...' if n > 16 else ''}")
+
+        # Count how many photons were altered
+        altered = sum(1 for o, m in zip(photons, modified_photons) if o.bit != m.bit or o.basis != m.basis)
+        pct = (altered / n * 100) if n else 0
+        self.console.print(f"         [bold red]└─[/] [bold yellow]⚠  {altered}/{n} photons modified ({pct:.0f}%)[/]")
+        self.console.print()
+
+        # Return modified payload
+        payload['photons'] = [p.to_dict() for p in modified_photons]
+        return payload
+
+    def _sniff_chat(self, payload, direction):
+        """Sniff encrypted chat messages."""
+        sender = payload.get('sender', '?')
+        ciphertext = payload.get('ciphertext', '')
+        bits_used = payload.get('bits_used', 0)
+        time_str = datetime.now().strftime('%H:%M:%S')
+        self.chat_messages_seen.append({'sender': sender, 'ciphertext': ciphertext, 'direction': direction})
+
+        self.console.print(f"[dim]{time_str}[/] [bold red]👁️  CHAT SNIFFED[/] [{direction}]")
+        self.console.print(f"         [bold red]│[/] Sender: [bold]{sender}[/]")
+        self.console.print(f"         [bold red]│[/] Cipher: [dim]{ciphertext[:60]}{'...' if len(ciphertext) > 60 else ''}[/]")
+        self.console.print(f"         [bold red]└─[/] [dim]{bits_used} bits • Cannot decrypt without key[/]")
+        self.console.print()
+
+    def _log_key_complete(self, payload, direction):
+        """Log when a key exchange completes."""
+        key_bits = payload.get('key', [])
+        error_rate = payload.get('error_rate', 0.0)
+        self.keys_observed += 1
+        time_str = datetime.now().strftime('%H:%M:%S')
+        self.console.print(f"[dim]{time_str}[/] [bold red]👁️  KEY EXCHANGE COMPLETE[/] [{direction}]")
+        self.console.print(f"         [bold red]│[/] Key length: {len(key_bits)} bits")
+        self.console.print(f"         [bold red]│[/] Error rate: {error_rate:.1%}")
+        if error_rate > ERROR_THRESHOLD:
+            self.console.print(f"         [bold red]└─ ⚠  Eve was DETECTED! Error rate too high.[/]")
+        else:
+            self.console.print(f"         [bold red]└─ [bold green]Eve went UNDETECTED![/] Error rate below threshold.[/]")
+        self.console.print()
+
+    def _log_sample(self, payload, direction):
+        """Log sample bit exchange."""
+        positions = payload.get('positions', [])
+        bits = payload.get('bits', [])
+        time_str = datetime.now().strftime('%H:%M:%S')
+        self.console.print(f"[dim]{time_str}[/] [bold red]👁️  SAMPLE BITS[/] [{direction}]")
+        self.console.print(f"         [bold red]└─[/] {len(positions)} sample positions sent for error checking")
+        self.console.print()
+
+    def _log(self, message, level="INFO"):
+        time_str = datetime.now().strftime('%H:%M:%S')
+        colors = {
+            "INTERCEPT": "bold red",
+            "CAUGHT": "bold bright_red",
+            "WARNING": "bold yellow",
+            "ERROR": "bold red",
+            "INFO": "dim",
+        }
+        style = colors.get(level, "dim")
+        prefix = "👁️ " if level in ("INTERCEPT", "CAUGHT") else ""
+        self.console.print(f"[dim]{time_str}[/] [{style}]{prefix}{message}[/]")
+
+    def _log_relay(self, msg_type, direction):
+        """Log a generic relayed message."""
+        type_names = {
+            MSG_CHAT: "CHAT", MSG_BB84_INIT: "BB84_INIT", MSG_BB84_PHOTONS: "BB84_PHOTONS",
+            MSG_BB84_BASES: "BB84_BASES", MSG_BB84_MATCHES: "BB84_MATCHES",
+            MSG_BB84_SAMPLE: "BB84_SAMPLE", MSG_BB84_VERIFY: "BB84_VERIFY",
+            MSG_BB84_COMPLETE: "BB84_COMPLETE", MSG_BB84_ABORT: "BB84_ABORT",
+            MSG_KEY_ROTATE: "KEY_ROTATE", MSG_COMMAND: "COMMAND",
+            MSG_STATUS: "STATUS", MSG_EVE_TOGGLE: "EVE_TOGGLE",
+            MSG_DISCONNECT: "DISCONNECT", MSG_ERROR: "ERROR",
+        }
+        name = type_names.get(msg_type, f"0x{msg_type:02X}")
+        time_str = datetime.now().strftime('%H:%M:%S')
+        self.console.print(f"[dim]{time_str} ─── Relay: {name} [{direction}][/]")
+
+    def _display_summary(self):
+        self.console.print()
+        self.console.print("[bold red]╔══════════════════════════════════════════════╗[/]")
+        self.console.print("[bold red]║[/]  [bold bright_white]👁️  EVE SESSION SUMMARY[/]                     [bold red]║[/]")
+        self.console.print("[bold red]╚══════════════════════════════════════════════╝[/]")
+        self.console.print(f"  Messages relayed:       {self.messages_relayed}")
+        self.console.print(f"  Photons intercepted:    {self.photons_intercepted}")
+        self.console.print(f"  Key exchanges observed: {self.keys_observed}")
+        self.console.print(f"  Chat messages sniffed:  {len(self.chat_messages_seen)}")
+        self.console.print()
+
+    def stop(self):
+        self.running = False
+        for s in (self.alice_socket, self.bob_socket, self.server_socket):
+            if s:
+                try: s.close()
+                except: pass
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════
 def get_lan_ip():
@@ -979,10 +1301,35 @@ def main():
     console.print("[bold]Who do you want to be?[/]")
     console.print("  [bold cyan]1.[/] Alice (connects to Bob)")
     console.print("  [bold green]2.[/] Bob   (waits for Alice)")
+    console.print("  [bold red]3.[/] Eve   (eavesdrop between Alice & Bob)")
     console.print()
-    choice = input("  Choose [1/2]: ").strip()
+    choice = input("  Choose [1/2/3]: ").strip()
 
-    if choice == '2' or choice.lower().startswith('b'):
+    if choice == '3' or choice.lower().startswith('e'):
+        # ── Eve (MITM Proxy) ──
+        console.print()
+        console.print("[bold red]  ═══ Eve Configuration ═══[/]")
+        console.print("[dim]  Eve connects to Bob's server, then waits for Alice to connect.[/]")
+        console.print("[dim]  Alice must connect to Eve's port instead of Bob's.[/]")
+        console.print()
+
+        bob_host = input("  Enter Bob's IP (or press Enter for localhost): ").strip()
+        if not bob_host: bob_host = 'localhost'
+        bob_port_str = input(f"  Enter Bob's port (or press Enter for {PORT}): ").strip()
+        bob_port = int(bob_port_str) if bob_port_str else PORT
+        listen_port_str = input(f"  Enter Eve's listen port for Alice (or press Enter for {PORT + 1}): ").strip()
+        listen_port = int(listen_port_str) if listen_port_str else PORT + 1
+
+        console.print()
+        lan_ip = get_lan_ip()
+        console.print(f"  [bold red]Eve's proxy:[/] [bold bright_white]{lan_ip}:{listen_port}[/]")
+        console.print(f"  [dim]Tell Alice to connect to {lan_ip}:{listen_port} instead of Bob.[/dim]")
+        console.print()
+
+        eve_proxy = EveProxy(bob_host=bob_host, bob_port=bob_port, listen_port=listen_port)
+        eve_proxy.start()
+
+    elif choice == '2' or choice.lower().startswith('b'):
         # ── Bob (Server) ──
         lan_ip = get_lan_ip()
         console.print()
@@ -1013,17 +1360,19 @@ def main():
         console.print()
         host = input("  Enter Bob's IP (or press Enter for localhost): ").strip()
         if not host: host = 'localhost'
+        port_str = input(f"  Enter port (or press Enter for {PORT}): ").strip()
+        port = int(port_str) if port_str else PORT
 
-        client = Client(host=host, port=PORT)
-        display_system_message(console, f"Connecting to Bob at {host}:{PORT}...", "INFO")
+        client = Client(host=host, port=port)
+        display_system_message(console, f"Connecting to Bob at {host}:{port}...", "INFO")
 
         if not client.connect():
-            display_system_message(console, "Failed to connect to Bob. Is the server running?", "ERROR")
+            display_system_message(console, "Failed to connect. Is the server running?", "ERROR")
             sys.exit(1)
 
-        display_system_message(console, f"Connected to Bob at {host}:{PORT}!", "SUCCESS")
+        display_system_message(console, f"Connected to Bob at {host}:{port}!", "SUCCESS")
         chat = ChatManager(role="Alice", network=client)
-        chat.peer_address = f"{host}:{PORT}"
+        chat.peer_address = f"{host}:{port}"
         try: chat.run()
         except Exception as e: display_system_message(console, f"Fatal error: {e}", "ERROR")
         finally: client.stop()
