@@ -1309,21 +1309,24 @@ def main():
         # ── Eve (MITM Proxy) ──
         console.print()
         console.print("[bold red]  ═══ Eve Configuration ═══[/]")
-        console.print("[dim]  Eve connects to Bob's server, then waits for Alice to connect.[/]")
-        console.print("[dim]  Alice must connect to Eve's port instead of Bob's.[/]")
+        console.print()
+        console.print("[bold bright_white]  Setup order (same machine):[/]")
+        console.print(f"    [bold green]1.[/] Start [bold green]Bob[/]   → enter port [bold]{PORT + 1}[/]")
+        console.print(f"    [bold red]2.[/] Start [bold red]Eve[/]   → just press Enter for defaults")
+        console.print(f"    [bold cyan]3.[/] Start [bold cyan]Alice[/] → just press Enter for defaults")
         console.print()
 
         bob_host = input("  Enter Bob's IP (or press Enter for localhost): ").strip()
         if not bob_host: bob_host = 'localhost'
-        bob_port_str = input(f"  Enter Bob's port (or press Enter for {PORT}): ").strip()
-        bob_port = int(bob_port_str) if bob_port_str else PORT
-        listen_port_str = input(f"  Enter Eve's listen port for Alice (or press Enter for {PORT + 1}): ").strip()
-        listen_port = int(listen_port_str) if listen_port_str else PORT + 1
+        bob_port_str = input(f"  Enter Bob's port (or press Enter for {PORT + 1}): ").strip()
+        bob_port = int(bob_port_str) if bob_port_str else PORT + 1
+        listen_port_str = input(f"  Enter Eve's listen port for Alice (or press Enter for {PORT}): ").strip()
+        listen_port = int(listen_port_str) if listen_port_str else PORT
 
         console.print()
         lan_ip = get_lan_ip()
         console.print(f"  [bold red]Eve's proxy:[/] [bold bright_white]{lan_ip}:{listen_port}[/]")
-        console.print(f"  [dim]Tell Alice to connect to {lan_ip}:{listen_port} instead of Bob.[/dim]")
+        console.print(f"  [dim]Alice connects to port {listen_port} (default) → Eve → Bob on port {bob_port}[/dim]")
         console.print()
 
         eve_proxy = EveProxy(bob_host=bob_host, bob_port=bob_port, listen_port=listen_port)
@@ -1335,10 +1338,12 @@ def main():
         console.print()
         console.print(f"  [bold green]Your IP:[/] [bold bright_white]{lan_ip}[/]")
         console.print(f"  [dim]Tell Alice to enter this IP when prompted.[/dim]")
+        port_str = input(f"  Enter port to listen on (or press Enter for {PORT}): ").strip()
+        port = int(port_str) if port_str else PORT
         console.print()
 
-        server = Server(host='0.0.0.0', port=PORT)
-        display_system_message(console, f"Starting server on 0.0.0.0:{PORT}...", "INFO")
+        server = Server(host='0.0.0.0', port=port)
+        display_system_message(console, f"Starting server on 0.0.0.0:{port}...", "INFO")
         server.start()
         display_system_message(console, f"Waiting for Alice to connect...", "INFO")
 
